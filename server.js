@@ -10,6 +10,8 @@ const fs = require("fs");
 const path = require("path");
 
 const app = express();
+app.get("/",(re,res)=>{res.status(200).send("school portal backend is running");
+});
 const PORT = process.env.PORT || 5000;
 
 app.use(cors());
@@ -384,13 +386,13 @@ app.get("/api/license/status", verifyToken, (req, res) => {
 // =======================
 // SERVE FRONTEND (REACT)
 // =======================
-const buildPath = path.join(__dirname, "build");
+//const buildPath = path.join(__dirname, "build");
 
-app.use(express.static(buildPath));
+//app.use(express.static(buildPath));
 
-app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, 'build', 'index.html'));
-});
+//app.get('*', (req, res) => {
+  //res.sendFile(path.join(__dirname, 'build', 'index.html'));
+//});
 
 /* =======================
    SERVER START
