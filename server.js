@@ -10,6 +10,7 @@ const fs = require("fs");
 const path = require("path");
 
 const app = express();
+
 app.get("/", (req, res) => {
   res.status(200).send("school portal backend is running");
 });
@@ -32,7 +33,7 @@ const MONGO_URI =
 mongoose
   .connect(MONGO_URI)
   .then(() => console.log("✅ MongoDB connected"))
-  .catch(err => console.error(err));
+  .catch((err) => console.error(err));
 
 /* =======================
    SYSTEM CONFIG (SETUP)
@@ -91,15 +92,18 @@ app.get("/api/setup/status", (req, res) => {
 app.post("/api/setup", async (req, res) => {
   try {
     const { schoolName, adminUsername, adminPassword, productKey } = req.body;
-    if (!schoolName || !adminUsername || !adminPassword || !productKey)
+    if (!schoolName || !adminUsername || !adminPassword || !productKey) {
       return res.status(400).json({ message: "All fields required" });
+    }
 
     const config = JSON.parse(fs.readFileSync(configPath));
-    if (config.installed)
+    if (config.installed) {
       return res.status(403).json({ message: "System already installed" });
+    }
 
-    if (!productKey.startsWith("BC-"))
+    if (!productKey.startsWith("BC-")) {
       return res.status(400).json({ message: "Invalid product key" });
+    }
 
     const hashed = await bcrypt.hash(adminPassword, 10);
 
@@ -137,7 +141,7 @@ app.post("/api/setup", async (req, res) => {
 /* =======================
    SCHEMAS
 ======================= */
-const genericSchema = fields =>
+const genericSchema = (fields) =>
   new mongoose.Schema(
     {
       ...fields,
@@ -199,10 +203,11 @@ const Timetable = mongoose.model("Timetable", genericSchema({}));
 const DigitalLibrary = mongoose.model("DigitalLibrary", genericSchema({}));
 const AdminMessage = mongoose.model("AdminMessage", genericSchema({}));
 
+// ✅ IMPORTANT: include schoolPortalUsers for permissions management
 const models = {
   schoolPortalStudents: Student,
   schoolPortalStaff: Staff,
-  schoolPortalUsers: User, // ✅ NEW
+  schoolPortalUsers: User, // ✅ FIX
   schoolPortalSubjects: Subject,
   schoolPortalResults: Result,
   schoolPortalPendingResults: PendingResult,
@@ -214,7 +219,7 @@ const models = {
 };
 
 /* =======================
-   AUTH ROUTES
+   AUTH ROUTES (PUBLIC)
 ======================= */
 app.post("/api/login", async (req, res) => {
   const { username, password } = req.body;
@@ -224,13 +229,11 @@ app.post("/api/login", async (req, res) => {
     (await Staff.findOne({ staffId: username })) ||
     (await User.findOne({ username }));
 
-  if (!user || !(await bcrypt.compare(password, user.password)))
+  if (!user || !(await bcrypt.compare(password, user.password))) {
     return res.status(401).json({ message: "Invalid credentials" });
+  }
 
-  if (
-    (user.type === "student" || user.type === "staff") &&
-    !user.isActivated
-  ) {
+  if ((user.type === "student" || user.type === "staff") && !user.isActivated) {
     return res.json({
       needsActivation: true,
       username: user.admissionNo || user.staffId,
@@ -248,6 +251,23 @@ app.post("/api/login", async (req, res) => {
   res.json({ token, user: safeUser });
 });
 
+app.post("/api/activate-account", async (req, res) => {
+  const { username, password } = req.body;
+
+  const user =
+    (await Student.findOne({ admissionNo: username })) ||
+    (await Staff.findOne({ staffId: username }));
+
+  if (!user) return res.status(404).json({ message: "User not found" });
+
+  user.password = await bcrypt.hash(password, 10);
+  user.isActivated = true;
+  user.activatedAt = new Date();
+  await user.save();
+
+  res.json({ message: "Account activated" });
+});
+
 /* =======================
    JWT MIDDLEWARE
 ======================= */
@@ -263,17 +283,104 @@ const verifyToken = (req, res, next) => {
 };
 
 /* =======================
+   PASSWORD CHANGE
+======================= */
+app.post("/api/change-password", async (req, res) => {
+  const { userId, oldPassword, newPassword } = req.body;
+
+  const user =
+    (await Student.findById(userId)) ||
+    (await Staff.findById(userId)) ||
+    (await User.findById(userId));
+
+  if (!user) return res.status(404).json({ message: "User not found" });
+
+  if (!(await bcrypt.compare(oldPassword, user.password))) {
+    return res.status(401).json({ message: "Old password incorrect" });
+  }
+
+  user.password = await bcrypt.hash(newPassword, 10);
+  await user.save();
+
+  res.json({ message: "Password changed successfully" });
+});
+
+/* =======================
    PROTECTED ROUTES
 ======================= */
 app.use("/api/:entity", verifyToken, checkLicense);
 
 /* =======================
-   GENERIC CRUD (WITH HASH)
+   LICENSE ACTIVATE / RENEW
 ======================= */
+app.post("/api/license/activate", verifyToken, async (req, res) => {
+  try {
+    if (req.user.type !== "admin") {
+      return res.status(403).json({ message: "Unauthorized" });
+    }
+
+    const { productKey, durationInDays } = req.body;
+
+    if (!productKey || !durationInDays) {
+      return res.status(400).json({ message: "Missing fields" });
+    }
+
+    if (!productKey.startsWith("BC-")) {
+      return res.status(400).json({ message: "Invalid product key" });
+    }
+
+    const config = JSON.parse(fs.readFileSync(configPath));
+
+    const expiryDate = new Date();
+    expiryDate.setDate(expiryDate.getDate() + Number(durationInDays));
+
+    const updatedConfig = {
+      ...config,
+      productKey,
+      licenseStatus: "active",
+      licenseExpiry: expiryDate.toISOString(),
+    };
+
+    fs.writeFileSync(configPath, JSON.stringify(updatedConfig, null, 2));
+
+    res.json({
+      message: "License activated successfully",
+      licenseExpiry: updatedConfig.licenseExpiry,
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+app.get("/api/license/status", verifyToken, (req, res) => {
+  if (req.user.type !== "admin") {
+    return res.status(403).json({ message: "Unauthorized" });
+  }
+
+  const config = JSON.parse(fs.readFileSync(configPath));
+
+  res.json({
+    licenseStatus: config.licenseStatus,
+    licenseExpiry: config.licenseExpiry,
+    productKey: config.productKey,
+  });
+});
+
+/* =======================
+   GENERIC CRUD (SAFE)
+   ✅ password hashing added
+======================= */
+app.get("/api/:entity", async (req, res) => {
+  const model = models[req.params.entity];
+  if (!model) return res.status(404).json({ message: "Entity not found" });
+  res.json(await model.find());
+});
+
 app.post("/api/:entity", async (req, res) => {
   const model = models[req.params.entity];
   if (!model) return res.status(404).json({ message: "Entity not found" });
 
+  // ✅ hash password if present
   if (req.body.password) {
     req.body.password = await bcrypt.hash(req.body.password, 10);
   }
@@ -285,22 +392,20 @@ app.put("/api/:entity/:id", async (req, res) => {
   const model = models[req.params.entity];
   if (!model) return res.status(404).json({ message: "Entity not found" });
 
+  // ✅ hash password if present
   if (req.body.password) {
     req.body.password = await bcrypt.hash(req.body.password, 10);
   }
 
-  res.json(await model.findByIdAndUpdate(req.params.id, req.body, { new: true }));
-});
-
-app.get("/api/:entity", async (req, res) => {
-  const model = models[req.params.entity];
-  if (!model) return res.status(404).json({ message: "Entity not found" });
-  res.json(await model.find());
+  res.json(
+    await model.findByIdAndUpdate(req.params.id, req.body, { new: true })
+  );
 });
 
 app.delete("/api/:entity/:id", async (req, res) => {
   const model = models[req.params.entity];
   if (!model) return res.status(404).json({ message: "Entity not found" });
+
   await model.findByIdAndDelete(req.params.id);
   res.sendStatus(204);
 });
@@ -308,6 +413,4 @@ app.delete("/api/:entity/:id", async (req, res) => {
 /* =======================
    SERVER START
 ======================= */
-app.listen(PORT, () =>
-  console.log(`🚀 Server running on port ${PORT}`)
-);
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
