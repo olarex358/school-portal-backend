@@ -10,8 +10,10 @@ const fs = require("fs");
 const path = require("path");
 
 const app = express();
-app.get("/",(re,res)=>{res.status(200).send("school portal backend is running");
+app.get("/", (req, res) => {
+  res.status(200).send("school portal backend is running");
 });
+
 const PORT = process.env.PORT || 5000;
 
 app.use(cors());
@@ -36,11 +38,11 @@ mongoose
    SYSTEM CONFIG (SETUP)
 ======================= */
 const configPath = path.join(__dirname, "systemConfig.json");
+
 const checkLicense = (req, res, next) => {
   try {
     const config = JSON.parse(fs.readFileSync(configPath));
 
-    // 🔒 Hard lock
     if (config.licenseStatus === "locked") {
       return res.status(403).json({
         message: "System locked. Please contact the vendor.",
@@ -48,23 +50,16 @@ const checkLicense = (req, res, next) => {
       });
     }
 
-    // ⏰ Expiry lock
-    if (
-      config.licenseExpiry &&
-      new Date() > new Date(config.licenseExpiry)
-    ) {
+    if (config.licenseExpiry && new Date() > new Date(config.licenseExpiry)) {
       return res.status(403).json({
         message: "License expired. Please renew.",
         code: "LICENSE_EXPIRED",
       });
     }
 
-    // ✅ Active license
     next();
-  } catch (err) {
-    return res.status(500).json({
-      message: "License check failed",
-    });
+  } catch {
+    return res.status(500).json({ message: "License check failed" });
   }
 };
 
@@ -77,6 +72,7 @@ if (!fs.existsSync(configPath)) {
         schoolName: "",
         installedAt: null,
         productKey: "",
+        licenseStatus: "inactive",
       },
       null,
       2
@@ -95,10 +91,8 @@ app.get("/api/setup/status", (req, res) => {
 app.post("/api/setup", async (req, res) => {
   try {
     const { schoolName, adminUsername, adminPassword, productKey } = req.body;
-
-    if (!schoolName || !adminUsername || !adminPassword || !productKey) {
+    if (!schoolName || !adminUsername || !adminPassword || !productKey)
       return res.status(400).json({ message: "All fields required" });
-    }
 
     const config = JSON.parse(fs.readFileSync(configPath));
     if (config.installed)
@@ -112,8 +106,11 @@ app.post("/api/setup", async (req, res) => {
     await User.create({
       username: adminUsername,
       password: hashed,
-      role: "admin",
+      role: "Super Admin",
       type: "admin",
+      isActivated: true,
+      needsActivation: false,
+      extraPermissions: [],
     });
 
     fs.writeFileSync(
@@ -124,6 +121,7 @@ app.post("/api/setup", async (req, res) => {
           schoolName,
           productKey,
           installedAt: new Date().toISOString(),
+          licenseStatus: "active",
         },
         null,
         2
@@ -140,13 +138,16 @@ app.post("/api/setup", async (req, res) => {
    SCHEMAS
 ======================= */
 const genericSchema = fields =>
-  new mongoose.Schema({
-    ...fields,
-    timestamp: { type: Date, default: Date.now },
-  });
+  new mongoose.Schema(
+    {
+      ...fields,
+      timestamp: { type: Date, default: Date.now },
+    },
+    { timestamps: true }
+  );
 
 const studentSchema = new mongoose.Schema({
-  admissionNo: { type: String, unique: true }, // BC/STD/...
+  admissionNo: { type: String, unique: true },
   firstName: String,
   lastName: String,
   studentClass: String,
@@ -169,12 +170,18 @@ const staffSchema = new mongoose.Schema({
   activatedAt: Date,
 });
 
-const userSchema = new mongoose.Schema({
-  username: String,
-  password: String,
-  role: String,
-  type: String,
-});
+const userSchema = new mongoose.Schema(
+  {
+    username: { type: String, unique: true },
+    password: String,
+    role: String,
+    type: String,
+    isActivated: { type: Boolean, default: true },
+    needsActivation: { type: Boolean, default: false },
+    extraPermissions: [String],
+  },
+  { timestamps: true }
+);
 
 /* =======================
    MODELS
@@ -195,6 +202,7 @@ const AdminMessage = mongoose.model("AdminMessage", genericSchema({}));
 const models = {
   schoolPortalStudents: Student,
   schoolPortalStaff: Staff,
+  schoolPortalUsers: User, // ✅ NEW
   schoolPortalSubjects: Subject,
   schoolPortalResults: Result,
   schoolPortalPendingResults: PendingResult,
@@ -206,7 +214,7 @@ const models = {
 };
 
 /* =======================
-   AUTH ROUTES (PUBLIC)
+   AUTH ROUTES
 ======================= */
 app.post("/api/login", async (req, res) => {
   const { username, password } = req.body;
@@ -240,23 +248,6 @@ app.post("/api/login", async (req, res) => {
   res.json({ token, user: safeUser });
 });
 
-app.post("/api/activate-account", async (req, res) => {
-  const { username, password } = req.body;
-
-  const user =
-    (await Student.findOne({ admissionNo: username })) ||
-    (await Staff.findOne({ staffId: username }));
-
-  if (!user) return res.status(404).json({ message: "User not found" });
-
-  user.password = await bcrypt.hash(password, 10);
-  user.isActivated = true;
-  user.activatedAt = new Date();
-  await user.save();
-
-  res.json({ message: "Account activated" });
-});
-
 /* =======================
    JWT MIDDLEWARE
 ======================= */
@@ -272,95 +263,39 @@ const verifyToken = (req, res, next) => {
 };
 
 /* =======================
-   PASSWORD CHANGE
-======================= */
-app.post("/api/change-password", async (req, res) => {
-  const { userId, oldPassword, newPassword } = req.body;
-
-  const user =
-    (await Student.findById(userId)) ||
-    (await Staff.findById(userId)) ||
-    (await User.findById(userId));
-
-  if (!user) return res.status(404).json({ message: "User not found" });
-
-  if (!(await bcrypt.compare(oldPassword, user.password)))
-    return res.status(401).json({ message: "Old password incorrect" });
-
-  user.password = await bcrypt.hash(newPassword, 10);
-  await user.save();
-
-  res.json({ message: "Password changed successfully" });
-});
-
-/* =======================
    PROTECTED ROUTES
 ======================= */
 app.use("/api/:entity", verifyToken, checkLicense);
-// 🔑 LICENSE ACTIVATE / RENEW (ADMIN ONLY)
-app.post("/api/license/activate", verifyToken, async (req, res) => {
-  try {
-    // Only admin can activate license
-    if (req.user.type !== "admin") {
-      return res.status(403).json({ message: "Unauthorized" });
-    }
-
-    const { productKey, durationInDays } = req.body;
-
-    if (!productKey || !durationInDays) {
-      return res.status(400).json({ message: "Missing fields" });
-    }
-
-    // Basic product key rule (you control this)
-    if (!productKey.startsWith("BC-")) {
-      return res.status(400).json({ message: "Invalid product key" });
-    }
-
-    const config = JSON.parse(fs.readFileSync(configPath));
-
-    // Calculate expiry
-    const expiryDate = new Date();
-    expiryDate.setDate(expiryDate.getDate() + Number(durationInDays));
-
-    // Update license
-    const updatedConfig = {
-      ...config,
-      productKey,
-      licenseStatus: "active",
-      licenseExpiry: expiryDate.toISOString(),
-    };
-
-    fs.writeFileSync(configPath, JSON.stringify(updatedConfig, null, 2));
-
-    res.json({
-      message: "License activated successfully",
-      licenseExpiry: updatedConfig.licenseExpiry,
-    });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
-
 
 /* =======================
-   GENERIC CRUD
+   GENERIC CRUD (WITH HASH)
 ======================= */
-app.get("/api/:entity", async (req, res) => {
-  const model = models[req.params.entity];
-  if (!model) return res.status(404).json({ message: "Entity not found" });
-  res.json(await model.find());
-});
-
 app.post("/api/:entity", async (req, res) => {
   const model = models[req.params.entity];
   if (!model) return res.status(404).json({ message: "Entity not found" });
+
+  if (req.body.password) {
+    req.body.password = await bcrypt.hash(req.body.password, 10);
+  }
+
   res.status(201).json(await model.create(req.body));
 });
 
 app.put("/api/:entity/:id", async (req, res) => {
   const model = models[req.params.entity];
   if (!model) return res.status(404).json({ message: "Entity not found" });
+
+  if (req.body.password) {
+    req.body.password = await bcrypt.hash(req.body.password, 10);
+  }
+
   res.json(await model.findByIdAndUpdate(req.params.id, req.body, { new: true }));
+});
+
+app.get("/api/:entity", async (req, res) => {
+  const model = models[req.params.entity];
+  if (!model) return res.status(404).json({ message: "Entity not found" });
+  res.json(await model.find());
 });
 
 app.delete("/api/:entity/:id", async (req, res) => {
@@ -369,30 +304,6 @@ app.delete("/api/:entity/:id", async (req, res) => {
   await model.findByIdAndDelete(req.params.id);
   res.sendStatus(204);
 });
-// 🔍 GET LICENSE STATUS (ADMIN VIEW)
-app.get("/api/license/status", verifyToken, (req, res) => {
-  if (req.user.type !== "admin") {
-    return res.status(403).json({ message: "Unauthorized" });
-  }
-
-  const config = JSON.parse(fs.readFileSync(configPath));
-
-  res.json({
-    licenseStatus: config.licenseStatus,
-    licenseExpiry: config.licenseExpiry,
-    productKey: config.productKey,
-  });
-});
-// =======================
-// SERVE FRONTEND (REACT)
-// =======================
-//const buildPath = path.join(__dirname, "build");
-
-//app.use(express.static(buildPath));
-
-//app.get('*', (req, res) => {
-  //res.sendFile(path.join(__dirname, 'build', 'index.html'));
-//});
 
 /* =======================
    SERVER START
