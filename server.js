@@ -207,7 +207,7 @@ const AdminMessage = mongoose.model("AdminMessage", genericSchema({}));
 const models = {
   schoolPortalStudents: Student,
   schoolPortalStaff: Staff,
-  schoolPortalUsers: User,
+  schoolPortalUsers: User, // ✅ FIX
   schoolPortalSubjects: Subject,
   schoolPortalResults: Result,
   schoolPortalPendingResults: PendingResult,
@@ -219,101 +219,53 @@ const models = {
 };
 
 /* =======================
-   AUTH HELPERS
-======================= */
-// ✅ Compatibility: supports old users whose password might be plain-text "123"
-async function verifyPasswordCompat(userDoc, inputPassword) {
-  if (!userDoc?.password) return false;
-
-  // bcrypt hash usually starts with $2a$ / $2b$ / $2y$
-  const looksHashed = typeof userDoc.password === "string" && userDoc.password.startsWith("$2");
-
-  if (looksHashed) {
-    return bcrypt.compare(inputPassword, userDoc.password);
-  }
-
-  // plain-text fallback (old data) — if matches, upgrade to hash
-  if (inputPassword === userDoc.password) {
-    userDoc.password = await bcrypt.hash(inputPassword, 10);
-    await userDoc.save();
-    return true;
-  }
-
-  return false;
-}
-
-function toSafeUser(userDoc) {
-  const obj = userDoc?.toObject ? userDoc.toObject() : userDoc;
-  if (!obj) return null;
-  const { password, __v, ...safe } = obj;
-  return safe;
-}
-
-/* =======================
    AUTH ROUTES (PUBLIC)
 ======================= */
 app.post("/api/login", async (req, res) => {
-  try {
-    const { username, password } = req.body;
+  const { username, password } = req.body;
 
-    const user =
-      (await Student.findOne({ admissionNo: username })) ||
-      (await Staff.findOne({ staffId: username })) ||
-      (await User.findOne({ username }));
+  const user =
+    (await Student.findOne({ admissionNo: username })) ||
+    (await Staff.findOne({ staffId: username })) ||
+    (await User.findOne({ username }));
 
-    if (!user) return res.status(401).json({ message: "Invalid credentials" });
-
-    const ok = await verifyPasswordCompat(user, password);
-    if (!ok) return res.status(401).json({ message: "Invalid credentials" });
-
-    // ✅ IMPORTANT FIX: return user object even when needsActivation
-    if ((user.type === "student" || user.type === "staff") && !user.isActivated) {
-      const safeUser = toSafeUser(user);
-
-      return res.status(200).json({
-        needsActivation: true,
-        user: {
-          ...safeUser,
-          needsActivation: true,
-        },
-      });
-    }
-
-    const token = jwt.sign(
-      { id: user._id, role: user.role, type: user.type },
-      JWT_SECRET,
-      { expiresIn: "1h" }
-    );
-
-    const safeUser = toSafeUser(user);
-    return res.json({ token, user: safeUser });
-  } catch (err) {
-    return res.status(500).json({ message: err.message || "Server error" });
+  if (!user || !(await bcrypt.compare(password, user.password))) {
+    return res.status(401).json({ message: "Invalid credentials" });
   }
+
+  if ((user.type === "student" || user.type === "staff") && !user.isActivated) {
+    return res.json({
+      needsActivation: true,
+      username: user.admissionNo || user.staffId,
+      userType: user.type,
+    });
+  }
+
+  const token = jwt.sign(
+    { id: user._id, role: user.role, type: user.type },
+    JWT_SECRET,
+    { expiresIn: "1h" }
+  );
+
+  const { password: _, ...safeUser } = user.toObject();
+  res.json({ token, user: safeUser });
 });
 
 app.post("/api/activate-account", async (req, res) => {
-  try {
-    const { username, password } = req.body;
+  const { username, password } = req.body;
 
-    const user =
-      (await Student.findOne({ admissionNo: username })) ||
-      (await Staff.findOne({ staffId: username }));
+  const user =
+    (await Student.findOne({ admissionNo: username })) ||
+    (await Staff.findOne({ staffId: username }));
 
-    if (!user) return res.status(404).json({ message: "User not found" });
+  if (!user) return res.status(404).json({ message: "User not found" });
 
-    user.password = await bcrypt.hash(password, 10);
-    user.isActivated = true;
-    user.activatedAt = new Date();
-    await user.save();
+  user.password = await bcrypt.hash(password, 10);
+  user.isActivated = true;
+  user.activatedAt = new Date();
+  await user.save();
 
-    // ✅ return consistent user format too (helps frontend)
-    const safeUser = toSafeUser(user);
-
-    res.json({ message: "Account activated", user: safeUser });
-  } catch (err) {
-    res.status(500).json({ message: err.message || "Server error" });
-  }
+  res.json({ message: "Account activated" });
 });
 
 /* =======================
@@ -334,26 +286,23 @@ const verifyToken = (req, res, next) => {
    PASSWORD CHANGE
 ======================= */
 app.post("/api/change-password", async (req, res) => {
-  try {
-    const { userId, oldPassword, newPassword } = req.body;
+  const { userId, oldPassword, newPassword } = req.body;
 
-    const user =
-      (await Student.findById(userId)) ||
-      (await Staff.findById(userId)) ||
-      (await User.findById(userId));
+  const user =
+    (await Student.findById(userId)) ||
+    (await Staff.findById(userId)) ||
+    (await User.findById(userId));
 
-    if (!user) return res.status(404).json({ message: "User not found" });
+  if (!user) return res.status(404).json({ message: "User not found" });
 
-    const ok = await verifyPasswordCompat(user, oldPassword);
-    if (!ok) return res.status(401).json({ message: "Old password incorrect" });
-
-    user.password = await bcrypt.hash(newPassword, 10);
-    await user.save();
-
-    res.json({ message: "Password changed successfully" });
-  } catch (err) {
-    res.status(500).json({ message: err.message || "Server error" });
+  if (!(await bcrypt.compare(oldPassword, user.password))) {
+    return res.status(401).json({ message: "Old password incorrect" });
   }
+
+  user.password = await bcrypt.hash(newPassword, 10);
+  await user.save();
+
+  res.json({ message: "Password changed successfully" });
 });
 
 /* =======================
@@ -431,8 +380,8 @@ app.post("/api/:entity", async (req, res) => {
   const model = models[req.params.entity];
   if (!model) return res.status(404).json({ message: "Entity not found" });
 
-  // ✅ hash password if present (only if it's not already a bcrypt hash)
-  if (req.body.password && typeof req.body.password === "string" && !req.body.password.startsWith("$2")) {
+  // ✅ hash password if present
+  if (req.body.password) {
     req.body.password = await bcrypt.hash(req.body.password, 10);
   }
 
@@ -443,12 +392,14 @@ app.put("/api/:entity/:id", async (req, res) => {
   const model = models[req.params.entity];
   if (!model) return res.status(404).json({ message: "Entity not found" });
 
-  // ✅ hash password if present (only if it's not already a bcrypt hash)
-  if (req.body.password && typeof req.body.password === "string" && !req.body.password.startsWith("$2")) {
+  // ✅ hash password if present
+  if (req.body.password) {
     req.body.password = await bcrypt.hash(req.body.password, 10);
   }
 
-  res.json(await model.findByIdAndUpdate(req.params.id, req.body, { new: true }));
+  res.json(
+    await model.findByIdAndUpdate(req.params.id, req.body, { new: true })
+  );
 });
 
 app.delete("/api/:entity/:id", async (req, res) => {
