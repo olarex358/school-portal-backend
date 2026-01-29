@@ -203,11 +203,10 @@ const Timetable = mongoose.model("Timetable", genericSchema({}));
 const DigitalLibrary = mongoose.model("DigitalLibrary", genericSchema({}));
 const AdminMessage = mongoose.model("AdminMessage", genericSchema({}));
 
-// ✅ IMPORTANT: include schoolPortalUsers for permissions management
 const models = {
   schoolPortalStudents: Student,
   schoolPortalStaff: Staff,
-  schoolPortalUsers: User, // ✅ FIX
+  schoolPortalUsers: User, // permissions mgmt
   schoolPortalSubjects: Subject,
   schoolPortalResults: Result,
   schoolPortalPendingResults: PendingResult,
@@ -221,51 +220,74 @@ const models = {
 /* =======================
    AUTH ROUTES (PUBLIC)
 ======================= */
+
+// ✅ Login ALWAYS returns token + user (even when activation is needed)
 app.post("/api/login", async (req, res) => {
-  const { username, password } = req.body;
+  try {
+    const { username, password } = req.body;
 
-  const user =
-    (await Student.findOne({ admissionNo: username })) ||
-    (await Staff.findOne({ staffId: username })) ||
-    (await User.findOne({ username }));
+    const user =
+      (await Student.findOne({ admissionNo: username })) ||
+      (await Staff.findOne({ staffId: username })) ||
+      (await User.findOne({ username }));
 
-  if (!user || !(await bcrypt.compare(password, user.password))) {
-    return res.status(401).json({ message: "Invalid credentials" });
+    if (!user || !user.password) {
+      return res.status(401).json({ message: "Invalid credentials" });
+    }
+
+    const ok = await bcrypt.compare(password, user.password);
+    if (!ok) return res.status(401).json({ message: "Invalid credentials" });
+
+    const token = jwt.sign(
+      { id: user._id, role: user.role, type: user.type },
+      JWT_SECRET,
+      { expiresIn: "1h" }
+    );
+
+    const safeUser = user.toObject();
+    delete safeUser.password;
+
+    // ✅ frontend-friendly flag
+    safeUser.needsActivation =
+      (user.type === "student" || user.type === "staff") && user.isActivated === false;
+
+    return res.json({ token, user: safeUser });
+  } catch (err) {
+    return res.status(500).json({ message: err.message || "Login failed" });
   }
-
-  if ((user.type === "student" || user.type === "staff") && !user.isActivated) {
-    return res.json({
-      needsActivation: true,
-      username: user.admissionNo || user.staffId,
-      userType: user.type,
-    });
-  }
-
-  const token = jwt.sign(
-    { id: user._id, role: user.role, type: user.type },
-    JWT_SECRET,
-    { expiresIn: "1h" }
-  );
-
-  const { password: _, ...safeUser } = user.toObject();
-  res.json({ token, user: safeUser });
 });
 
+// ✅ Activation route expects { username, password } (matches frontend)
 app.post("/api/activate-account", async (req, res) => {
-  const { username, password } = req.body;
+  try {
+    const { username, password } = req.body;
 
-  const user =
-    (await Student.findOne({ admissionNo: username })) ||
-    (await Staff.findOne({ staffId: username }));
+    const user =
+      (await Student.findOne({ admissionNo: username })) ||
+      (await Staff.findOne({ staffId: username }));
 
-  if (!user) return res.status(404).json({ message: "User not found" });
+    if (!user) return res.status(404).json({ message: "User not found" });
 
-  user.password = await bcrypt.hash(password, 10);
-  user.isActivated = true;
-  user.activatedAt = new Date();
-  await user.save();
+    user.password = await bcrypt.hash(password, 10);
+    user.isActivated = true;
+    user.activatedAt = new Date();
+    await user.save();
 
-  res.json({ message: "Account activated" });
+    // optional: return token+user so frontend continues without extra login
+    const token = jwt.sign(
+      { id: user._id, role: user.role, type: user.type },
+      JWT_SECRET,
+      { expiresIn: "1h" }
+    );
+
+    const safeUser = user.toObject();
+    delete safeUser.password;
+    safeUser.needsActivation = false;
+
+    res.json({ message: "Account activated", token, user: safeUser });
+  } catch (err) {
+    res.status(500).json({ message: err.message || "Activation failed" });
+  }
 });
 
 /* =======================
@@ -367,8 +389,9 @@ app.get("/api/license/status", verifyToken, (req, res) => {
 });
 
 /* =======================
-   GENERIC CRUD (SAFE)
-   ✅ password hashing added
+   GENERIC CRUD (SAFE + STABLE)
+   ✅ Adds default password "123" for new staff/students
+   ✅ Maps StudentManagement fields to backend schema
 ======================= */
 app.get("/api/:entity", async (req, res) => {
   const model = models[req.params.entity];
@@ -377,8 +400,35 @@ app.get("/api/:entity", async (req, res) => {
 });
 
 app.post("/api/:entity", async (req, res) => {
-  const model = models[req.params.entity];
+  const entity = req.params.entity;
+  const model = models[entity];
   if (!model) return res.status(404).json({ message: "Entity not found" });
+
+  // ✅ normalize incoming payload (frontend -> backend)
+  if (entity === "schoolPortalStudents") {
+    // StudentManagement uses: name, classLevel, guardianPhone
+    if (!req.body.studentClass && req.body.classLevel) req.body.studentClass = req.body.classLevel;
+    if (!req.body.parentPhone && req.body.guardianPhone) req.body.parentPhone = req.body.guardianPhone;
+
+    // name -> firstName/lastName
+    if ((!req.body.firstName || !req.body.lastName) && req.body.name) {
+      const parts = String(req.body.name).trim().split(/\s+/);
+      req.body.firstName = req.body.firstName || parts.shift() || "";
+      req.body.lastName = req.body.lastName || parts.join(" ") || "";
+    }
+
+    // default login settings
+    if (!req.body.password) req.body.password = "123";
+    req.body.isActivated = false;
+    req.body.type = "student";
+  }
+
+  if (entity === "schoolPortalStaff") {
+    // default login settings
+    if (!req.body.password) req.body.password = "123";
+    req.body.isActivated = false;
+    req.body.type = "staff";
+  }
 
   // ✅ hash password if present
   if (req.body.password) {
@@ -392,14 +442,11 @@ app.put("/api/:entity/:id", async (req, res) => {
   const model = models[req.params.entity];
   if (!model) return res.status(404).json({ message: "Entity not found" });
 
-  // ✅ hash password if present
   if (req.body.password) {
     req.body.password = await bcrypt.hash(req.body.password, 10);
   }
 
-  res.json(
-    await model.findByIdAndUpdate(req.params.id, req.body, { new: true })
-  );
+  res.json(await model.findByIdAndUpdate(req.params.id, req.body, { new: true }));
 });
 
 app.delete("/api/:entity/:id", async (req, res) => {
