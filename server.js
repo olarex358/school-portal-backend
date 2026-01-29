@@ -7,53 +7,30 @@ const fs = require("fs");
 const path = require("path");
 
 const app = express();
-const PORT = process.env.PORT || 5000;
-
-app.use(cors());
-app.use(express.json());
 
 app.get("/", (req, res) => {
   res.status(200).send("school portal backend is running");
 });
 
-/* =======================
-   ENV (move to Render env later)
-======================= */
+const PORT = process.env.PORT || 5000;
+
+app.use(cors());
+app.use(express.json());
+
 const JWT_SECRET = process.env.JWT_SECRET || "your_super_secret_key";
 const MONGO_URI =
   process.env.MONGO_URI ||
   "mongodb+srv://ridwanullah24:olarewaju@cluster0.s0b1kif.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0";
 
-/* =======================
-   DB CONNECTION
-======================= */
 mongoose
   .connect(MONGO_URI)
   .then(() => console.log("✅ MongoDB connected"))
-  .catch((err) => console.error("❌ MongoDB connect error:", err));
+  .catch((err) => console.error(err));
 
 /* =======================
-   LICENSE/SETUP CONFIG
+   SYSTEM CONFIG
 ======================= */
 const configPath = path.join(__dirname, "systemConfig.json");
-
-if (!fs.existsSync(configPath)) {
-  fs.writeFileSync(
-    configPath,
-    JSON.stringify(
-      {
-        installed: false,
-        schoolName: "",
-        installedAt: null,
-        productKey: "",
-        licenseStatus: "inactive",
-        licenseExpiry: null,
-      },
-      null,
-      2
-    )
-  );
-}
 
 const checkLicense = (req, res, next) => {
   try {
@@ -79,40 +56,81 @@ const checkLicense = (req, res, next) => {
   }
 };
 
-const verifyToken = (req, res, next) => {
-  const bearer = req.headers.authorization || "";
-  const token = bearer.startsWith("Bearer ") ? bearer.split(" ")[1] : null;
-
-  if (!token) return res.status(403).json({ message: "No token provided" });
-
-  jwt.verify(token, JWT_SECRET, (err, decoded) => {
-    if (err) return res.status(401).json({ message: "Invalid token" });
-    req.user = decoded;
-    next();
-  });
-};
+if (!fs.existsSync(configPath)) {
+  fs.writeFileSync(
+    configPath,
+    JSON.stringify(
+      {
+        installed: false,
+        schoolName: "",
+        installedAt: null,
+        productKey: "",
+        licenseStatus: "inactive",
+      },
+      null,
+      2
+    )
+  );
+}
 
 /* =======================
-   HELPERS
+   SETUP ROUTES
 ======================= */
-function splitName(fullName = "") {
-  const parts = String(fullName).trim().split(/\s+/).filter(Boolean);
-  const firstName = parts.shift() || "";
-  const lastName = parts.join(" ") || "";
-  return { firstName, lastName };
-}
+app.get("/api/setup/status", (req, res) => {
+  const config = JSON.parse(fs.readFileSync(configPath));
+  res.json({ installed: config.installed });
+});
 
-function lastWord(fullName = "") {
-  const parts = String(fullName).trim().split(/\s+/).filter(Boolean);
-  return parts.length ? parts[parts.length - 1] : "";
-}
+app.post("/api/setup", async (req, res) => {
+  try {
+    const { schoolName, adminUsername, adminPassword, productKey } = req.body;
+    if (!schoolName || !adminUsername || !adminPassword || !productKey) {
+      return res.status(400).json({ message: "All fields required" });
+    }
 
-function normalizeLower(s) {
-  return String(s || "").trim().toLowerCase();
-}
+    const config = JSON.parse(fs.readFileSync(configPath));
+    if (config.installed) {
+      return res.status(403).json({ message: "System already installed" });
+    }
+
+    if (!productKey.startsWith("BC-")) {
+      return res.status(400).json({ message: "Invalid product key" });
+    }
+
+    const hashed = await bcrypt.hash(adminPassword, 10);
+
+    await User.create({
+      username: adminUsername,
+      password: hashed,
+      role: "Super Admin",
+      type: "admin",
+      isActivated: true,
+      extraPermissions: [],
+    });
+
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify(
+        {
+          installed: true,
+          schoolName,
+          productKey,
+          installedAt: new Date().toISOString(),
+          licenseStatus: "active",
+        },
+        null,
+        2
+      )
+    );
+
+    res.json({ message: "System setup completed" });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
 
 /* =======================
-   SCHEMAS
+   SCHEMAS / MODELS
 ======================= */
 const genericSchema = (fields) =>
   new mongoose.Schema(
@@ -123,63 +141,49 @@ const genericSchema = (fields) =>
     { timestamps: true }
   );
 
-const studentSchema = new mongoose.Schema(
-  {
-    admissionNo: { type: String, unique: true, sparse: true },
-    firstName: String,
-    lastName: String,
-    studentClass: String,
-    gender: String,
-    parentPhone: String,
+const studentSchema = new mongoose.Schema({
+  admissionNo: { type: String, unique: true },
+  firstName: String,
+  lastName: String,
+  studentClass: String,
+  gender: String,
+  parentPhone: String,
+  guardianName: String,
+  address: String,
+  status: String,
+  dateOfBirth: String,
+  photo: String,
 
-    // auth
-    password: String,
-    type: { type: String, default: "student" },
-    isActivated: { type: Boolean, default: false },
-    activatedAt: Date,
+  password: String,
+  type: { type: String, default: "student" },
+  isActivated: { type: Boolean, default: false },
+  activatedAt: Date,
+});
 
-    // extra safe fields
-    status: { type: String, default: "Active" },
-    guardianName: String,
-    address: String,
-    photo: String,
-    dateOfBirth: String,
-  },
-  { timestamps: true }
-);
+const staffSchema = new mongoose.Schema({
+  staffId: { type: String, unique: true },
+  surname: String,
+  firstname: String,
+  role: String,
 
-const staffSchema = new mongoose.Schema(
-  {
-    staffId: { type: String, unique: true, sparse: true },
-    surname: String,
-    firstname: String,
-    role: String,
-
-    // auth
-    password: String,
-    type: { type: String, default: "staff" },
-    isActivated: { type: Boolean, default: false },
-    activatedAt: Date,
-  },
-  { timestamps: true }
-);
+  password: String,
+  type: { type: String, default: "staff" },
+  isActivated: { type: Boolean, default: false },
+  activatedAt: Date,
+});
 
 const userSchema = new mongoose.Schema(
   {
-    username: { type: String, unique: true, sparse: true },
+    username: { type: String, unique: true },
     password: String,
     role: String,
     type: String,
     isActivated: { type: Boolean, default: true },
-    needsActivation: { type: Boolean, default: false },
     extraPermissions: [String],
   },
   { timestamps: true }
 );
 
-/* =======================
-   MODELS
-======================= */
 const Student = mongoose.model("Student", studentSchema);
 const Staff = mongoose.model("Staff", staffSchema);
 const User = mongoose.model("User", userSchema);
@@ -196,8 +200,7 @@ const AdminMessage = mongoose.model("AdminMessage", genericSchema({}));
 const models = {
   schoolPortalStudents: Student,
   schoolPortalStaff: Staff,
-  schoolPortalUsers: User, // ✅ for UserPermissionsManagement
-
+  schoolPortalUsers: User,
   schoolPortalSubjects: Subject,
   schoolPortalResults: Result,
   schoolPortalPendingResults: PendingResult,
@@ -209,91 +212,31 @@ const models = {
 };
 
 /* =======================
-   SETUP ROUTES (PUBLIC)
+   AUTH ROUTES
 ======================= */
-app.get("/api/setup/status", (req, res) => {
-  const config = JSON.parse(fs.readFileSync(configPath));
-  res.json({ installed: config.installed });
-});
-
-app.post("/api/setup", async (req, res) => {
-  try {
-    const { schoolName, adminUsername, adminPassword, productKey } = req.body;
-
-    if (!schoolName || !adminUsername || !adminPassword || !productKey) {
-      return res.status(400).json({ message: "All fields required" });
-    }
-
-    const config = JSON.parse(fs.readFileSync(configPath));
-    if (config.installed) return res.status(403).json({ message: "System already installed" });
-
-    if (!String(productKey).startsWith("BC-")) {
-      return res.status(400).json({ message: "Invalid product key" });
-    }
-
-    const hashed = await bcrypt.hash(adminPassword, 10);
-
-    await User.create({
-      username: adminUsername,
-      password: hashed,
-      role: "Super Admin",
-      type: "admin",
-      isActivated: true,
-      needsActivation: false,
-      extraPermissions: [],
-    });
-
-    fs.writeFileSync(
-      configPath,
-      JSON.stringify(
-        {
-          installed: true,
-          schoolName,
-          productKey,
-          installedAt: new Date().toISOString(),
-          licenseStatus: "active",
-          licenseExpiry: null,
-        },
-        null,
-        2
-      )
-    );
-
-    return res.json({ message: "System setup completed" });
-  } catch (err) {
-    return res.status(500).json({ message: err.message || "Setup failed" });
-  }
-});
-
-/* =======================
-   AUTH ROUTES (PUBLIC)
-======================= */
-
-// ✅ Login ALWAYS returns { token, user }
 app.post("/api/login", async (req, res) => {
   try {
-    const uname = String(req.body.username || "").trim();
-    const pw = String(req.body.password || "");
+    const { username, password } = req.body;
 
-    const found =
-      (await Student.findOne({ admissionNo: uname })) ||
-      (await Staff.findOne({ staffId: uname })) ||
-      (await User.findOne({ username: uname }));
+    const user =
+      (await Student.findOne({ admissionNo: username })) ||
+      (await Staff.findOne({ staffId: username })) ||
+      (await User.findOne({ username }));
 
-    if (!found || !found.password) {
+    if (!user || !user.password) {
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
-    const ok = await bcrypt.compare(pw, found.password);
+    const ok = await bcrypt.compare(password, user.password);
     if (!ok) return res.status(401).json({ message: "Invalid credentials" });
 
     const token = jwt.sign(
-      { id: found._id, role: found.role, type: found.type },
+      { id: user._id, role: user.role, type: user.type },
       JWT_SECRET,
       { expiresIn: "1h" }
     );
 
-    const safeUser = found.toObject();
+    const safeUser = user.toObject();
     delete safeUser.password;
 
     safeUser.needsActivation =
@@ -306,34 +249,28 @@ app.post("/api/login", async (req, res) => {
   }
 });
 
-// ✅ Activate account expects { username, password } and returns { token, user }
 app.post("/api/activate-account", async (req, res) => {
   try {
-    const uname = String(req.body.username || "").trim();
-    const newPw = String(req.body.password || "");
+    const { username, password } = req.body;
 
-    if (!uname || !newPw) {
-      return res.status(400).json({ message: "username and password required" });
-    }
+    const user =
+      (await Student.findOne({ admissionNo: username })) ||
+      (await Staff.findOne({ staffId: username }));
 
-    const found =
-      (await Student.findOne({ admissionNo: uname })) ||
-      (await Staff.findOne({ staffId: uname }));
+    if (!user) return res.status(404).json({ message: "User not found" });
 
-    if (!found) return res.status(404).json({ message: "User not found" });
-
-    found.password = await bcrypt.hash(newPw, 10);
-    found.isActivated = true;
-    found.activatedAt = new Date();
-    await found.save();
+    user.password = await bcrypt.hash(password, 10);
+    user.isActivated = true;
+    user.activatedAt = new Date();
+    await user.save();
 
     const token = jwt.sign(
-      { id: found._id, role: found.role, type: found.type },
+      { id: user._id, role: user.role, type: user.type },
       JWT_SECRET,
       { expiresIn: "1h" }
     );
 
-    const safeUser = found.toObject();
+    const safeUser = user.toObject();
     delete safeUser.password;
     safeUser.needsActivation = false;
 
@@ -344,68 +281,33 @@ app.post("/api/activate-account", async (req, res) => {
 });
 
 /* =======================
-   LICENSE ROUTES (PROTECTED)
+   JWT MIDDLEWARE
 ======================= */
-app.post("/api/license/activate", verifyToken, async (req, res) => {
-  try {
-    if (req.user.type !== "admin") return res.status(403).json({ message: "Unauthorized" });
+const verifyToken = (req, res, next) => {
+  const token = req.headers.authorization?.split(" ")[1];
+  if (!token) return res.status(403).json({ message: "No token provided" });
 
-    const { productKey, durationInDays } = req.body;
-    if (!productKey || !durationInDays) return res.status(400).json({ message: "Missing fields" });
-
-    if (!String(productKey).startsWith("BC-")) {
-      return res.status(400).json({ message: "Invalid product key" });
-    }
-
-    const config = JSON.parse(fs.readFileSync(configPath));
-
-    const expiryDate = new Date();
-    expiryDate.setDate(expiryDate.getDate() + Number(durationInDays));
-
-    const updatedConfig = {
-      ...config,
-      productKey,
-      licenseStatus: "active",
-      licenseExpiry: expiryDate.toISOString(),
-    };
-
-    fs.writeFileSync(configPath, JSON.stringify(updatedConfig, null, 2));
-
-    return res.json({
-      message: "License activated successfully",
-      licenseExpiry: updatedConfig.licenseExpiry,
-    });
-  } catch (err) {
-    return res.status(500).json({ message: err.message || "License activation failed" });
-  }
-});
-
-app.get("/api/license/status", verifyToken, (req, res) => {
-  if (req.user.type !== "admin") return res.status(403).json({ message: "Unauthorized" });
-  const config = JSON.parse(fs.readFileSync(configPath));
-  return res.json({
-    licenseStatus: config.licenseStatus,
-    licenseExpiry: config.licenseExpiry,
-    productKey: config.productKey,
+  jwt.verify(token, JWT_SECRET, (err, decoded) => {
+    if (err) return res.status(401).json({ message: "Invalid token" });
+    req.user = decoded;
+    next();
   });
-});
+};
 
 /* =======================
-   ENTITY ROUTES (PROTECTED)
+   PROTECTED ENTITY ROUTES
 ======================= */
 app.use("/api/:entity", verifyToken, checkLicense);
 
 /* =======================
-   GENERIC CRUD
-   ✅ Students: password = surname (from full name)
-   ✅ Staff: password = surname (separate field)
-   ✅ Maps frontend fields to schema
+   GENERIC CRUD (SAFE)
+   ✅ deletes client _id/id to prevent local_ crash
+   ✅ students/staff default password = 123 (hashed) if missing
 ======================= */
 app.get("/api/:entity", async (req, res) => {
   const model = models[req.params.entity];
   if (!model) return res.status(404).json({ message: "Entity not found" });
-  const list = await model.find();
-  return res.json(list);
+  res.json(await model.find());
 });
 
 app.post("/api/:entity", async (req, res) => {
@@ -414,46 +316,57 @@ app.post("/api/:entity", async (req, res) => {
     const model = models[entity];
     if (!model) return res.status(404).json({ message: "Entity not found" });
 
-    let body = { ...req.body };
+    const body = { ...req.body };
 
-    // ---- STUDENTS ----
+    // ✅ never accept client ids
+    delete body._id;
+    delete body.id;
+
+    // ✅ map student fields from your StudentManagement UI
     if (entity === "schoolPortalStudents") {
-      // map frontend -> backend
       if (!body.studentClass && body.classLevel) body.studentClass = body.classLevel;
       if (!body.parentPhone && body.guardianPhone) body.parentPhone = body.guardianPhone;
 
-      // name -> firstName/lastName if needed
+      // if UI sent only name, split it
       if ((!body.firstName || !body.lastName) && body.name) {
-        const n = splitName(body.name);
-        body.firstName = body.firstName || n.firstName;
-        body.lastName = body.lastName || n.lastName;
+        const parts = String(body.name).trim().split(/\s+/);
+        body.firstName = parts.shift() || "";
+        body.lastName = parts.join(" ") || "";
       }
 
-      // password = surname (lastName preferred, else last word of full name)
-      const surname = normalizeLower(body.lastName) || normalizeLower(lastWord(body.name)) || "123";
-      body.password = await bcrypt.hash(surname, 10);
-
+      // ✅ default password 123
+      if (!body.password) body.password = "123";
+      body.password = await bcrypt.hash(String(body.password), 10);
       body.type = "student";
       if (body.isActivated === undefined) body.isActivated = false;
     }
 
-    // ---- STAFF ----
+    // ✅ staff default password 123
     if (entity === "schoolPortalStaff") {
-      const surname = normalizeLower(body.surname) || "123";
-      body.password = await bcrypt.hash(surname, 10);
-
+      if (!body.password) body.password = "123";
+      body.password = await bcrypt.hash(String(body.password), 10);
       body.type = "staff";
       if (body.isActivated === undefined) body.isActivated = false;
     }
 
-    // other entities: hash password only if explicitly provided
-    if (entity !== "schoolPortalStudents" && entity !== "schoolPortalStaff" && body.password) {
+    // hash password for other entities only if provided
+    if (
+      entity !== "schoolPortalStudents" &&
+      entity !== "schoolPortalStaff" &&
+      body.password
+    ) {
       body.password = await bcrypt.hash(String(body.password), 10);
     }
 
     const created = await model.create(body);
     return res.status(201).json(created);
   } catch (err) {
+    if (err?.name === "ValidationError") {
+      return res.status(400).json({ message: err.message, errors: err.errors });
+    }
+    if (err?.code === 11000) {
+      return res.status(409).json({ message: "Duplicate record", keyValue: err.keyValue });
+    }
     return res.status(500).json({ message: err.message || "Create failed" });
   }
 });
@@ -464,42 +377,37 @@ app.put("/api/:entity/:id", async (req, res) => {
     const model = models[entity];
     if (!model) return res.status(404).json({ message: "Entity not found" });
 
-    let body = { ...req.body };
+    const body = { ...req.body };
 
-    // allow mapping on update too
+    // map student updates too
     if (entity === "schoolPortalStudents") {
       if (!body.studentClass && body.classLevel) body.studentClass = body.classLevel;
       if (!body.parentPhone && body.guardianPhone) body.parentPhone = body.guardianPhone;
 
       if ((!body.firstName || !body.lastName) && body.name) {
-        const n = splitName(body.name);
-        body.firstName = body.firstName || n.firstName;
-        body.lastName = body.lastName || n.lastName;
+        const parts = String(body.name).trim().split(/\s+/);
+        body.firstName = parts.shift() || "";
+        body.lastName = parts.join(" ") || "";
       }
     }
 
-    // hash if password provided
     if (body.password) body.password = await bcrypt.hash(String(body.password), 10);
 
     const updated = await model.findByIdAndUpdate(req.params.id, body, { new: true });
     return res.json(updated);
   } catch (err) {
+    if (err?.name === "ValidationError") {
+      return res.status(400).json({ message: err.message, errors: err.errors });
+    }
     return res.status(500).json({ message: err.message || "Update failed" });
   }
 });
 
 app.delete("/api/:entity/:id", async (req, res) => {
-  try {
-    const model = models[req.params.entity];
-    if (!model) return res.status(404).json({ message: "Entity not found" });
-    await model.findByIdAndDelete(req.params.id);
-    return res.sendStatus(204);
-  } catch (err) {
-    return res.status(500).json({ message: err.message || "Delete failed" });
-  }
+  const model = models[req.params.entity];
+  if (!model) return res.status(404).json({ message: "Entity not found" });
+  await model.findByIdAndDelete(req.params.id);
+  res.sendStatus(204);
 });
 
-/* =======================
-   START SERVER
-======================= */
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
