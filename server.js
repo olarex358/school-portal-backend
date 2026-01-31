@@ -14,10 +14,41 @@ app.get("/", (req, res) => {
 
 const PORT = process.env.PORT || 5000;
 
-app.use(cors());
+/* =======================
+   ✅ CORS (v0.1)
+   - Allows Authorization header
+   - Restricts origins safely
+======================= */
+const allowedOrigins = [
+  process.env.FRONTEND_URL,              // e.g. https://your-frontend.vercel.app
+  process.env.FRONTEND_URL_2,            // optional second domain
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+].filter(Boolean);
+
+app.use(
+  cors({
+    origin: function (origin, cb) {
+      // allow server-to-server and tools with no origin
+      if (!origin) return cb(null, true);
+      if (allowedOrigins.includes(origin)) return cb(null, true);
+      return cb(new Error("CORS blocked origin: " + origin));
+    },
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  })
+);
+
+app.options("*", cors());
 app.use(express.json());
 
+/* =======================
+   ENV
+======================= */
 const JWT_SECRET = process.env.JWT_SECRET || "your_super_secret_key";
+// ✅ v0.1: longer session to avoid random 401 after 1 hour
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "8h";
+
 const MONGO_URI =
   process.env.MONGO_URI ||
   "mongodb+srv://ridwanullah24:olarewaju@cluster0.s0b1kif.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0";
@@ -32,7 +63,33 @@ mongoose
 ======================= */
 const configPath = path.join(__dirname, "systemConfig.json");
 
+if (!fs.existsSync(configPath)) {
+  fs.writeFileSync(
+    configPath,
+    JSON.stringify(
+      {
+        installed: false,
+        schoolName: "",
+        installedAt: null,
+        productKey: "",
+        licenseStatus: "inactive", // inactive | active | locked
+        licenseExpiry: null,
+      },
+      null,
+      2
+    )
+  );
+}
+
+/**
+ * ✅ v0.1 rule:
+ * - READS (GET) must work even if license is bad
+ * - WRITES (POST/PUT/DELETE) are blocked when locked/expired
+ */
 const checkLicense = (req, res, next) => {
+  // ✅ do not block reads in v0.1
+  if (req.method === "GET") return next();
+
   try {
     const config = JSON.parse(fs.readFileSync(configPath));
 
@@ -52,26 +109,10 @@ const checkLicense = (req, res, next) => {
 
     next();
   } catch {
+    // ✅ do not block reads; but for writes, fail clearly
     return res.status(500).json({ message: "License check failed" });
   }
 };
-
-if (!fs.existsSync(configPath)) {
-  fs.writeFileSync(
-    configPath,
-    JSON.stringify(
-      {
-        installed: false,
-        schoolName: "",
-        installedAt: null,
-        productKey: "",
-        licenseStatus: "inactive",
-      },
-      null,
-      2
-    )
-  );
-}
 
 /* =======================
    SETUP ROUTES
@@ -117,6 +158,7 @@ app.post("/api/setup", async (req, res) => {
           productKey,
           installedAt: new Date().toISOString(),
           licenseStatus: "active",
+          licenseExpiry: null,
         },
         null,
         2
@@ -141,8 +183,9 @@ const genericSchema = (fields) =>
     { timestamps: true }
   );
 
+// Students: supports your frontend (admissionNo, classLevel -> mapped later)
 const studentSchema = new mongoose.Schema({
-  admissionNo: { type: String, unique: true },
+  admissionNo: { type: String, unique: true, index: true },
   firstName: String,
   lastName: String,
   studentClass: String,
@@ -156,15 +199,20 @@ const studentSchema = new mongoose.Schema({
 
   password: String,
   type: { type: String, default: "student" },
+  role: { type: String, default: "Student" },
   isActivated: { type: Boolean, default: false },
   activatedAt: Date,
 });
 
+// Staff: add assignedClasses/assignedSubjects since timetable/results use it
 const staffSchema = new mongoose.Schema({
-  staffId: { type: String, unique: true },
+  staffId: { type: String, unique: true, index: true },
   surname: String,
   firstname: String,
   role: String,
+
+  assignedClasses: { type: [String], default: [] },
+  assignedSubjects: { type: [String], default: [] },
 
   password: String,
   type: { type: String, default: "staff" },
@@ -174,7 +222,7 @@ const staffSchema = new mongoose.Schema({
 
 const userSchema = new mongoose.Schema(
   {
-    username: { type: String, unique: true },
+    username: { type: String, unique: true, index: true },
     password: String,
     role: String,
     type: String,
@@ -184,6 +232,62 @@ const userSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+/**
+ * ✅ v0.1 Attendance must be consistent (fixes reporting + duplicates)
+ */
+const attendanceSchema = new mongoose.Schema(
+  {
+    date: { type: String, required: true, index: true }, // YYYY-MM-DD
+    class: { type: String, required: true, index: true },
+    admissionNo: { type: String, required: true, index: true },
+    status: { type: String, default: "Present" }, // Present | Absent | Late
+    markedBy: String,
+
+    session: { type: String, default: "" }, // "2025/2026"
+    term: { type: String, default: "" },    // "Third Term"
+  },
+  { timestamps: true }
+);
+
+// prevent duplicates per day per student (per term/session if provided)
+attendanceSchema.index(
+  { date: 1, class: 1, admissionNo: 1, session: 1, term: 1 },
+  { unique: true, sparse: true }
+);
+
+// ✅ v0.1 entities missing in your models map (frontend calls them)
+const promotionSchema = genericSchema({
+  studentId: String,     // admissionNo
+  fromClass: String,
+  toClass: String,
+  session: String,       // "2025/2026"
+  term: String,          // "Third Term"
+  promotedBy: String,
+  date: String,
+  rolledBack: { type: Boolean, default: false },
+});
+
+const calendarEventSchema = genericSchema({
+  title: String,
+  date: String,
+  time: String,
+  location: String,
+  note: String,
+  audience: { type: String, default: "all" }, // all | students | staff
+});
+
+const certificationSchema = genericSchema({
+  title: String,
+  studentAdmissionNo: String,
+  studentName: String,
+  className: String,
+  type: String,
+  description: String,
+  issuedDate: String,
+  status: String,
+  fileUrl: String,
+});
+
 const Student = mongoose.model("Student", studentSchema);
 const Staff = mongoose.model("Staff", staffSchema);
 const User = mongoose.model("User", userSchema);
@@ -192,10 +296,18 @@ const Subject = mongoose.model("Subject", genericSchema({}));
 const Result = mongoose.model("Result", genericSchema({}));
 const PendingResult = mongoose.model("PendingResult", genericSchema({}));
 const FeeRecord = mongoose.model("FeeRecord", genericSchema({}));
-const Attendance = mongoose.model("Attendance", genericSchema({}));
+
+// ✅ Use strict schema
+const Attendance = mongoose.model("Attendance", attendanceSchema);
+
 const Timetable = mongoose.model("Timetable", genericSchema({}));
 const DigitalLibrary = mongoose.model("DigitalLibrary", genericSchema({}));
 const AdminMessage = mongoose.model("AdminMessage", genericSchema({}));
+
+// ✅ new
+const Promotion = mongoose.model("Promotion", promotionSchema);
+const CalendarEvent = mongoose.model("CalendarEvent", calendarEventSchema);
+const Certification = mongoose.model("Certification", certificationSchema);
 
 const models = {
   schoolPortalStudents: Student,
@@ -209,6 +321,11 @@ const models = {
   schoolPortalTimetables: Timetable,
   schoolPortalDigitalLibrary: DigitalLibrary,
   schoolPortalAdminMessages: AdminMessage,
+
+  // ✅ add missing entities used by frontend
+  schoolPortalPromotions: Promotion,
+  schoolPortalCalendarEvents: CalendarEvent,
+  schoolPortalCertifications: Certification,
 };
 
 /* =======================
@@ -231,9 +348,17 @@ app.post("/api/login", async (req, res) => {
     if (!ok) return res.status(401).json({ message: "Invalid credentials" });
 
     const token = jwt.sign(
-      { id: user._id, role: user.role, type: user.type },
+      {
+        id: user._id,
+        role: user.role,
+        type: user.type,
+        // ✅ optional identifiers for frontend stability
+        admissionNo: user.admissionNo,
+        staffId: user.staffId,
+        username: user.username,
+      },
       JWT_SECRET,
-      { expiresIn: "1h" }
+      { expiresIn: JWT_EXPIRES_IN }
     );
 
     const safeUser = user.toObject();
@@ -265,9 +390,15 @@ app.post("/api/activate-account", async (req, res) => {
     await user.save();
 
     const token = jwt.sign(
-      { id: user._id, role: user.role, type: user.type },
+      {
+        id: user._id,
+        role: user.role,
+        type: user.type,
+        admissionNo: user.admissionNo,
+        staffId: user.staffId,
+      },
       JWT_SECRET,
-      { expiresIn: "1h" }
+      { expiresIn: JWT_EXPIRES_IN }
     );
 
     const safeUser = user.toObject();
@@ -284,11 +415,19 @@ app.post("/api/activate-account", async (req, res) => {
    JWT MIDDLEWARE
 ======================= */
 const verifyToken = (req, res, next) => {
-  const token = req.headers.authorization?.split(" ")[1];
+  const auth = req.headers.authorization || "";
+  const token = auth.startsWith("Bearer ") ? auth.split(" ")[1] : null;
+
   if (!token) return res.status(403).json({ message: "No token provided" });
 
   jwt.verify(token, JWT_SECRET, (err, decoded) => {
-    if (err) return res.status(401).json({ message: "Invalid token" });
+    if (err) {
+      const msg =
+        err.name === "TokenExpiredError"
+          ? "Token expired"
+          : "Invalid token";
+      return res.status(401).json({ message: msg });
+    }
     req.user = decoded;
     next();
   });
@@ -339,6 +478,7 @@ app.post("/api/:entity", async (req, res) => {
       body.password = await bcrypt.hash(String(body.password), 10);
       body.type = "student";
       if (body.isActivated === undefined) body.isActivated = false;
+      if (!body.role) body.role = "Student";
     }
 
     // ✅ staff default password 123
