@@ -289,6 +289,30 @@ const certificationSchema = genericSchema({
   fileUrl: String,
 });
 
+/* =======================
+   ✅ NEW: Certification Results + Registrations (for student pages)
+   - These are the exact entities your frontend calls:
+     /api/schoolPortalCertificationResults
+     /api/schoolPortalCertificationRegistrations
+======================= */
+const certificationResultSchema = genericSchema({
+  studentAdmissionNo: String,
+  subjectCode: String,
+  date: String,
+  objScore: Number,
+  theoryScore: Number,
+  pracScore: Number,
+  totalScore: Number,
+  status: String,
+});
+
+const certificationRegistrationSchema = genericSchema({
+  studentAdmissionNo: String,
+  subjectCode: String,
+  examDate: String,
+  status: String,
+});
+
 const Student = mongoose.model("Student", studentSchema);
 const Staff = mongoose.model("Staff", staffSchema);
 const User = mongoose.model("User", userSchema);
@@ -310,6 +334,16 @@ const Promotion = mongoose.model("Promotion", promotionSchema);
 const CalendarEvent = mongoose.model("CalendarEvent", calendarEventSchema);
 const Certification = mongoose.model("Certification", certificationSchema);
 
+// ✅ NEW models
+const CertificationResult = mongoose.model(
+  "CertificationResult",
+  certificationResultSchema
+);
+const CertificationRegistration = mongoose.model(
+  "CertificationRegistration",
+  certificationRegistrationSchema
+);
+
 const models = {
   schoolPortalStudents: Student,
   schoolPortalStaff: Staff,
@@ -327,6 +361,10 @@ const models = {
   schoolPortalPromotions: Promotion,
   schoolPortalCalendarEvents: CalendarEvent,
   schoolPortalCertifications: Certification,
+
+  // ✅ NEW: fixes student 404s
+  schoolPortalCertificationResults: CertificationResult,
+  schoolPortalCertificationRegistrations: CertificationRegistration,
 };
 
 /* =======================
