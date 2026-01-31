@@ -39,8 +39,7 @@ app.use(
   })
 );
 
-app.options(/.*/, cors(corsOptions));
-
+app.options(/.*/, cors());
 
 app.use(express.json());
 
